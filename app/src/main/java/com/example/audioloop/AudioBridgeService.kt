@@ -57,6 +57,7 @@ class AudioBridgeService : Service() {
 
     @Volatile private var wiredConnected = false
     @Volatile private var btConnected = false
+    @Volatile private var wiredNoMicDetected = false
 
     override fun onBind(intent: Intent?): IBinder = binder
 
@@ -82,7 +83,50 @@ class AudioBridgeService : Service() {
 
     fun getStatus(): Triple<Boolean, Boolean, Boolean> = Triple(wiredConnected, btConnected, running)
 
+    fun isWiredNoMic(): Boolean = wiredNoMicDetected
+
     fun forceRefresh() = refreshDeviceStatus()
+
+    /**
+     * 返回当前系统识别到的所有输入/输出音频设备的原始信息，用于排查“插入 AUX 线没反应”这类问题。
+     */
+    fun dumpAudioDevices(): String {
+        val sb = StringBuilder()
+        sb.append("== 输入设备 (INPUTS) ==\n")
+        val inputs = audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS)
+        if (inputs.isEmpty()) {
+            sb.append("(无)\n")
+        } else {
+            inputs.forEach { sb.append(describeDevice(it)).append('\n') }
+        }
+        sb.append("\n== 输出设备 (OUTPUTS) ==\n")
+        val outputs = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+        if (outputs.isEmpty()) {
+            sb.append("(无)\n")
+        } else {
+            outputs.forEach { sb.append(describeDevice(it)).append('\n') }
+        }
+        return sb.toString()
+    }
+
+    private fun describeDevice(info: AudioDeviceInfo): String {
+        val name = runCatching { info.productName?.toString() }.getOrNull() ?: "未知"
+        return "· ${typeName(info.type)} (type=${info.type})  名称: $name"
+    }
+
+    private fun typeName(type: Int): String = when (type) {
+        AudioDeviceInfo.TYPE_WIRED_HEADSET -> "有线耳机(带麦克风)"
+        AudioDeviceInfo.TYPE_WIRED_HEADPHONES -> "有线耳机(无麦克风)"
+        AudioDeviceInfo.TYPE_BUILTIN_MIC -> "内置麦克风"
+        AudioDeviceInfo.TYPE_BUILTIN_SPEAKER -> "内置扬声器"
+        AudioDeviceInfo.TYPE_BLUETOOTH_A2DP -> "蓝牙(A2DP 音乐)"
+        AudioDeviceInfo.TYPE_BLUETOOTH_SCO -> "蓝牙(SCO 通话)"
+        AudioDeviceInfo.TYPE_USB_DEVICE -> "USB 设备"
+        AudioDeviceInfo.TYPE_USB_HEADSET -> "USB 耳机"
+        AudioDeviceInfo.TYPE_LINE_ANALOG -> "模拟 Line-in"
+        AudioDeviceInfo.TYPE_TELEPHONY -> "通话设备"
+        else -> "未知类型"
+    }
 
     private val deviceCallback = object : AudioDeviceCallback() {
         override fun onAudioDevicesAdded(addedDevices: Array<AudioDeviceInfo>) = refreshDeviceStatus()
@@ -91,15 +135,25 @@ class AudioBridgeService : Service() {
 
     private fun refreshDeviceStatus() {
         val inputs = audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS)
-        val newWired = inputs.any { it.type == AudioDeviceInfo.TYPE_WIRED_HEADSET }
+        val newWired = inputs.any {
+            it.type == AudioDeviceInfo.TYPE_WIRED_HEADSET ||
+                it.type == AudioDeviceInfo.TYPE_USB_HEADSET ||
+                it.type == AudioDeviceInfo.TYPE_USB_DEVICE ||
+                it.type == AudioDeviceInfo.TYPE_LINE_ANALOG
+        }
 
         val outputs = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
         val newBt = outputs.any {
             it.type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP || it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO
         }
+        // 插了线但系统没有识别出麦克风电路（常见于普通三段 AUX 线）：耳机孔有输出设备，但输入列表里没有对应设备
+        val newWiredNoMic = !newWired && outputs.any {
+            it.type == AudioDeviceInfo.TYPE_WIRED_HEADPHONES || it.type == AudioDeviceInfo.TYPE_WIRED_HEADSET
+        }
 
         wiredConnected = newWired
         btConnected = newBt
+        wiredNoMicDetected = newWiredNoMic
 
         if (wiredConnected && !running) {
             startLoopback()

@@ -12,6 +12,7 @@ import android.os.IBinder
 import android.view.View
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import com.example.audioloop.databinding.ActivityMainBinding
@@ -61,6 +62,10 @@ class MainActivity : AppCompatActivity(), AudioBridgeService.StatusListener {
 
         binding.btnRefresh.setOnClickListener {
             if (bound) service?.forceRefresh() else ensurePermissionAndStart()
+        }
+
+        binding.btnDebug.setOnClickListener {
+            showDeviceDebugDialog()
         }
 
         ensurePermissionAndStart()
@@ -126,13 +131,22 @@ class MainActivity : AppCompatActivity(), AudioBridgeService.StatusListener {
             setBoxState(binding.boxWired, binding.tvWiredState, wired)
             setBoxState(binding.boxBluetooth, binding.tvBtState, bluetooth)
 
-            binding.tvStatus.setText(
-                when {
-                    running -> R.string.status_running
-                    wired && !bluetooth -> R.string.status_wired_only
-                    else -> R.string.status_idle
-                }
-            )
+            val noMic = service?.isWiredNoMic() == true
+            binding.tvStatus.text = when {
+                running -> getString(R.string.status_running)
+                noMic -> getString(R.string.status_no_mic)
+                wired && !bluetooth -> getString(R.string.status_wired_only)
+                else -> getString(R.string.status_idle)
+            }
         }
+    }
+
+    private fun showDeviceDebugDialog() {
+        val content = service?.dumpAudioDevices() ?: "服务未连接"
+        AlertDialog.Builder(this)
+            .setTitle(R.string.dialog_title_devices)
+            .setMessage(content)
+            .setPositiveButton(R.string.dialog_close, null)
+            .show()
     }
 }
