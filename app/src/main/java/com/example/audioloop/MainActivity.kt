@@ -34,6 +34,7 @@ class MainActivity : AppCompatActivity(), AudioBridgeService.StatusListener {
 
     private var inputIds: List<String> = emptyList()
     private var outputIds: List<String> = emptyList()
+    private var lastShownError: String? = null
 
     private val requestPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -174,10 +175,18 @@ class MainActivity : AppCompatActivity(), AudioBridgeService.StatusListener {
 
             val inputLabel = status.inputs.find { it.id == status.effectiveInputId }?.label
             val outputLabel = status.outputs.find { it.id == status.effectiveOutputId }?.label
-            binding.tvStatus.text = if (status.running && inputLabel != null && outputLabel != null) {
-                getString(R.string.status_running_fmt, inputLabel, outputLabel)
-            } else {
-                getString(R.string.status_idle)
+            binding.tvStatus.text = when {
+                status.running && inputLabel != null && outputLabel != null ->
+                    getString(R.string.status_running_fmt, inputLabel, outputLabel)
+                status.errorMessage != null -> "转发失败：${status.errorMessage}"
+                else -> getString(R.string.status_idle)
+            }
+
+            if (status.errorMessage != null && status.errorMessage != lastShownError) {
+                lastShownError = status.errorMessage
+                Toast.makeText(this, status.errorMessage, Toast.LENGTH_LONG).show()
+            } else if (status.errorMessage == null) {
+                lastShownError = null
             }
         }
     }

@@ -28,6 +28,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.util.Log
 import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationCompat
 
@@ -43,11 +44,12 @@ import androidx.core.app.NotificationCompat
 class AudioBridgeService : Service() {
 
     companion object {
+        private const val TAG = "AudioLoop"
         private const val CHANNEL_ID = "audio_loop_channel"
         private const val NOTIFICATION_ID = 1
         private const val DEFAULT_SAMPLE_RATE = 44100
         private const val SCO_SAMPLE_RATE = 16000
-        private const val SCO_CONNECT_TIMEOUT_MS = 4000L
+        private const val SCO_CONNECT_TIMEOUT_MS = 8000L
         const val AUTO_ID = "auto"
     }
 
@@ -67,7 +69,8 @@ class AudioBridgeService : Service() {
         val effectiveInputId: String?,
         val manualOutputId: String?,
         val effectiveOutputId: String?,
-        val running: Boolean
+        val running: Boolean,
+        val errorMessage: String? = null
     )
 
     interface StatusListener {
@@ -96,6 +99,8 @@ class AudioBridgeService : Service() {
     private var scoReceiverRegistered = false
     @Volatile private var scoConnected = false
     private val scoLock = Object()
+
+    @Volatile private var lastError: String? = null
 
     private val relevantInputTypes = setOf(
         AudioDeviceInfo.TYPE_WIRED_HEADSET,
@@ -166,8 +171,11 @@ class AudioBridgeService : Service() {
         if (ActivityCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
             != PackageManager.PERMISSION_GRANTED
         ) {
+            lastError = "没有录音权限，无法开始转发"
+            notifyStatus()
             return
         }
+        lastError = null
         running = true
         loopbackThread = Thread({
             android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_AUDIO)
@@ -299,7 +307,8 @@ class AudioBridgeService : Service() {
                 effectiveInputId = input?.id,
                 manualOutputId = manualOutputId,
                 effectiveOutputId = output?.id,
-                running = running
+                running = running,
+                errorMessage = lastError
             )
         )
     }
@@ -352,7 +361,16 @@ class AudioBridgeService : Service() {
         val input = resolveInput()
         val output = resolveOutput(input)
 
-        if (input == null || output == null) {
+        Log.d(TAG, "runLoopback: input=$input output=$output")
+
+        if (input == null) {
+            lastError = "没有找到可用的输入设备"
+            running = false
+            notifyStatus()
+            return
+        }
+        if (output == null) {
+            lastError = "没有找到可用的输出设备"
             running = false
             notifyStatus()
             return
@@ -362,6 +380,16 @@ class AudioBridgeService : Service() {
         var scoStarted = false
 
         if (useSco) {
+            @Suppress("DEPRECATION")
+            val scoAvailable = audioManager.isBluetoothScoAvailableOffCall
+            Log.d(TAG, "isBluetoothScoAvailableOffCall=$scoAvailable")
+            if (!scoAvailable) {
+                lastError = "此手机/系统不支持在非通话状态下建立蓝牙通话音频通道(SCO)，无法把蓝牙耳机当麦克风用"
+                running = false
+                notifyStatus()
+                return
+            }
+
             scoConnected = false
             audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
             @Suppress("DEPRECATION")
@@ -374,7 +402,10 @@ class AudioBridgeService : Service() {
                     runCatching { scoLock.wait(SCO_CONNECT_TIMEOUT_MS) }
                 }
             }
+            Log.d(TAG, "sco wait finished, scoConnected=$scoConnected")
             if (!scoConnected) {
+                lastError = "蓝牙通话音频通道(SCO)连接超时（等了${SCO_CONNECT_TIMEOUT_MS / 1000}秒）。" +
+                    "常见原因：所选蓝牙设备不支持免提通话/麦克风功能，或系统蓝牙设置里没有为它勾选“通话音频”"
                 cleanupSco(true)
                 running = false
                 notifyStatus()
@@ -396,10 +427,13 @@ class AudioBridgeService : Service() {
             @Suppress("MissingPermission")
             AudioRecord(source, sampleRate, channelIn, encoding, bufferSize)
         } catch (e: Exception) {
+            Log.e(TAG, "AudioRecord create failed", e)
             null
         }
 
         if (audioRecord == null || audioRecord.state != AudioRecord.STATE_INITIALIZED) {
+            Log.e(TAG, "AudioRecord init failed, state=${audioRecord?.state}")
+            lastError = "麦克风初始化失败（source=$source, sampleRate=$sampleRate），可能输入设备不支持该采集参数"
             audioRecord?.release()
             cleanupSco(scoStarted)
             running = false
@@ -407,32 +441,55 @@ class AudioBridgeService : Service() {
             return
         }
 
-        input.audioDeviceInfo?.let { runCatching { audioRecord.preferredDevice = it } }
+        input.audioDeviceInfo?.let {
+            val ok = runCatching { audioRecord.preferredDevice = it }.isSuccess
+            Log.d(TAG, "set input preferredDevice=${it.type} ok=$ok")
+        }
 
         val minBufOut = AudioTrack.getMinBufferSize(sampleRate, channelOut, encoding)
-        val audioTrack = AudioTrack(
-            AudioAttributes.Builder()
-                .setUsage(AudioAttributes.USAGE_MEDIA)
-                .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                .build(),
-            AudioFormat.Builder()
-                .setEncoding(encoding)
-                .setSampleRate(sampleRate)
-                .setChannelMask(channelOut)
-                .build(),
-            minBufOut.coerceAtLeast(bufferSize),
-            AudioTrack.MODE_STREAM,
-            AudioManager.AUDIO_SESSION_ID_GENERATE
-        )
+        val audioTrack = try {
+            AudioTrack(
+                AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_MEDIA)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                    .build(),
+                AudioFormat.Builder()
+                    .setEncoding(encoding)
+                    .setSampleRate(sampleRate)
+                    .setChannelMask(channelOut)
+                    .build(),
+                minBufOut.coerceAtLeast(bufferSize),
+                AudioTrack.MODE_STREAM,
+                AudioManager.AUDIO_SESSION_ID_GENERATE
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "AudioTrack create failed", e)
+            null
+        }
+
+        if (audioTrack == null || audioTrack.state != AudioTrack.STATE_INITIALIZED) {
+            lastError = "播放器初始化失败（sampleRate=$sampleRate），可能输出设备不支持该播放参数"
+            runCatching { audioRecord.stop() }
+            runCatching { audioRecord.release() }
+            audioTrack?.release()
+            cleanupSco(scoStarted)
+            running = false
+            notifyStatus()
+            return
+        }
 
         // 关键修复：显式绑定输出设备，避免系统“有线优先于蓝牙”的默认路由策略
         // 把声音送回了错误的设备（比如又送回 3.5mm 耳机本身的喇叭）。
-        output.audioDeviceInfo?.let { runCatching { audioTrack.preferredDevice = it } }
+        output.audioDeviceInfo?.let {
+            val ok = runCatching { audioTrack.preferredDevice = it }.isSuccess
+            Log.d(TAG, "set output preferredDevice=${it.type} ok=$ok")
+        }
 
         val buffer = ByteArray(bufferSize)
         try {
             audioRecord.startRecording()
             audioTrack.play()
+            Log.d(TAG, "loopback started: sampleRate=$sampleRate useSco=$useSco")
             while (running && !Thread.currentThread().isInterrupted) {
                 val read = audioRecord.read(buffer, 0, buffer.size)
                 if (read > 0) {
@@ -440,7 +497,8 @@ class AudioBridgeService : Service() {
                 }
             }
         } catch (e: Exception) {
-            // 采集/播放过程中出现异常（比如设备中途断开）时结束循环
+            Log.e(TAG, "loopback loop error", e)
+            lastError = "转发过程中出现异常：${e.message}"
         } finally {
             runCatching { audioRecord.stop() }
             runCatching { audioRecord.release() }
