@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">音频转发</string>
+    <string name="status_waiting">正在检测设备状态…</string>
+    <string name="status_running">正在转发：3.5mm → 蓝牙耳机</string>
+    <string name="status_wired_only">已检测到音频输入，等待蓝牙耳机连接</string>
+    <string name="status_idle">请插入 3.5mm 音频线并连接蓝牙耳机</string>
+    <string name="label_wired">3.5mm 音频输入</string>
+    <string name="label_bluetooth">蓝牙耳机</string>
+    <string name="state_connected">已连接</string>
+    <string name="state_disconnected">未连接</string>
+    <string name="btn_refresh">刷新状态</string>
+    <string name="permission_denied">需要录音权限才能转发音频</string>
+    <string name="notification_title">音频转发服务</string>
+</resources>
