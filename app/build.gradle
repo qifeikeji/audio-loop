@@ -9,8 +9,8 @@ android {
 
     defaultConfig {
         applicationId "com.example.audioloop"
-        // 目标机型 Android 11 (API 30)
-        minSdk 26
+        // 目标机型 Android 11 (API 30)；minSdk 28 是为了直接使用 AudioDeviceInfo#getAddress() 区分多个蓝牙设备
+        minSdk 28
         targetSdk 30
         versionCode 1
         versionName "1.0"
